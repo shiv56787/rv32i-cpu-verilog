@@ -1,0 +1,509 @@
+// ==================== Program Counter ====================
+module PC(
+    input clk, rst, step_mode, step_trigger, halt,
+    input [31:0] pc_next,
+    output reg [31:0] pc
+);
+    reg step_prev;
+    wire step_pulse;
+    
+    assign step_pulse = step_trigger && !step_prev;
+    
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin
+            pc <= 0;
+            step_prev <= 0;
+        end else begin
+            step_prev <= step_trigger;
+            if(!halt && (!step_mode || step_pulse))
+                pc <= pc_next;
+        end
+    end
+endmodule
+
+// ==================== Instruction Memory ====================
+module InstructionMemory(
+    input [31:0] addr,
+    output [31:0] instruction
+);
+    reg [31:0] mem [0:127];
+    
+    initial begin
+        // Comprehensive test program with ALL RV32I instructions
+        
+        // Basic arithmetic & logical
+        mem[0]  = 32'h00500093; // addi x1, x0, 5     (x1 = 5)
+        mem[1]  = 32'h00300113; // addi x2, x0, 3     (x2 = 3)
+        mem[2]  = 32'h002081B3; // add  x3, x1, x2    (x3 = 8)
+        mem[3]  = 32'h40208233; // sub  x4, x1, x2    (x4 = 2)
+        mem[4]  = 32'h0020A2B3; // slt  x5, x1, x2    (x5 = 0)
+        mem[5]  = 32'h0020F333; // and  x6, x1, x2    (x6 = 1)
+        mem[6]  = 32'h0020E3B3; // or   x7, x1, x2    (x7 = 7)
+        mem[7]  = 32'h0020C433; // xor  x8, x1, x2    (x8 = 6)
+        
+        // Shifts
+        mem[8]  = 32'h00209493; // slli x9, x1, 2     (x9 = 20)
+        mem[9]  = 32'h0010D513; // srli x10, x1, 1    (x10 = 2)
+        mem[10] = 32'hFFF00593; // addi x11, x0, -1   (x11 = -1)
+        mem[11] = 32'h4015D613; // srai x12, x11, 1   (x12 = -1, arith shift)
+        
+        // Upper immediate instructions
+        mem[12] = 32'h123456B7; // lui  x13, 0x12345  (x13 = 0x12345000)
+        mem[13] = 32'h00000717; // auipc x14, 0       (x14 = PC = 52)
+        
+        // Memory operations - Word
+        mem[14] = 32'h00412223; // sw   x4, 4(x2)     (mem[7] = 2)
+        mem[15] = 32'h00412783; // lw   x15, 4(x2)    (x15 = 2)
+        
+        // Memory operations - Byte
+        mem[16] = 32'h00410823; // sb   x4, 16(x2)    (mem[19] byte = 2)
+        mem[17] = 32'h01010803; // lb   x16, 16(x2)   (x16 = 2, sign-ext)
+        mem[18] = 32'h01014883; // lbu  x17, 16(x2)   (x17 = 2, zero-ext)
+        
+        // Memory operations - Halfword  
+        mem[19] = 32'hFFE00913; // addi x18, x0, -2   (x18 = -2)
+        mem[20] = 32'h01211923; // sh   x18, 18(x2)   (mem[21] half = -2)
+        mem[21] = 32'h01211983; // lh   x19, 18(x2)   (x19 = -2, sign-ext)
+        mem[22] = 32'h01215A03; // lhu  x20, 18(x2)   (x20 = 0xFFFE, zero-ext)
+        
+        // Branch instructions
+        mem[23] = 32'h00208863; // beq  x1, x2, 16    (not taken)
+        mem[24] = 32'h00209463; // bne  x1, x2, 8     (taken, skip next)
+        mem[25] = 32'h00000013; // nop (skipped)
+        mem[26] = 32'h00114A63; // blt  x2, x1, 20    (taken, 3 < 5)
+        mem[27] = 32'h00000013; // nop (skipped)
+        mem[28] = 32'h00000013; // nop (skipped)
+        mem[29] = 32'h00000013; // nop (skipped)
+        mem[30] = 32'h00115463; // bge  x2, x1, 8     (not taken)
+        mem[31] = 32'h00A00A93; // addi x21, x0, 10   (x21 = 10)
+        
+        // Jump instructions
+        mem[32] = 32'h008000EF; // jal  x1, 8         (x1 = PC+4=132, jump to 136)
+        mem[33] = 32'h00000013; // nop (skipped)
+        mem[34] = 32'h00C00B13; // addi x22, x0, 12   (x22 = 12, at PC=136)
+        mem[35] = 32'h00008067; // jalr x0, x1, 0     (jump to x1=132, return)
+        mem[36] = 32'h00D00B93; // addi x23, x0, 13   (x23 = 13, back at 140)
+        
+        // System calls
+        mem[37] = 32'h00000073; // ecall              (environment call)
+        mem[38] = 32'h00100073; // ebreak             (breakpoint)
+        
+        // End program
+        mem[39] = 32'h00000013; // nop
+        mem[40] = 32'h00000013; // nop
+    end
+    
+    assign instruction = mem[addr[31:2]];
+endmodule
+
+// ==================== Register File ====================
+module RegisterFile(
+    input clk, we,
+    input [4:0] ra1, ra2, wa,
+    input [31:0] wd,
+    output [31:0] rd1, rd2
+);
+    reg [31:0] regs [0:31];
+    integer i;
+    
+    initial begin
+        for(i = 0; i < 32; i = i + 1)
+            regs[i] = 0;
+    end
+    
+    assign rd1 = (ra1 == 0) ? 0 : regs[ra1];
+    assign rd2 = (ra2 == 0) ? 0 : regs[ra2];
+    
+    always @(posedge clk) begin
+        if(we && wa != 0)
+            regs[wa] <= wd;
+    end
+endmodule
+
+// ==================== Immediate Generator ====================
+module ImmGen(
+    input [31:0] instr,
+    output reg [31:0] imm
+);
+    always @(*) begin
+        case(instr[6:0])
+            7'b0010011, 7'b0000011, 7'b1100111: // I-type (ALU, Load, JALR)
+                imm = {{20{instr[31]}}, instr[31:20]};
+            7'b0100011: // S-type (Store)
+                imm = {{20{instr[31]}}, instr[31:25], instr[11:7]};
+            7'b1100011: // B-type (Branch)
+                imm = {{19{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
+            7'b1101111: // J-type (JAL)
+                imm = {{11{instr[31]}}, instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
+            7'b0110111, 7'b0010111: // U-type (LUI, AUIPC)
+                imm = {instr[31:12], 12'b0};
+            default: imm = 0;
+        endcase
+    end
+endmodule
+
+// ==================== ALU ====================
+module ALU(
+    input [31:0] a, b,
+    input [3:0] alu_ctrl,
+    output reg [31:0] result,
+    output zero, less_than
+);
+    always @(*) begin
+        case(alu_ctrl)
+            4'b0000: result = a + b;           // ADD
+            4'b0001: result = a - b;           // SUB
+            4'b0010: result = a & b;           // AND
+            4'b0011: result = a | b;           // OR
+            4'b0100: result = a ^ b;           // XOR
+            4'b0101: result = a << b[4:0];     // SLL
+            4'b0110: result = a >> b[4:0];     // SRL
+            4'b0111: result = $signed(a) >>> b[4:0]; // SRA
+            4'b1000: result = ($signed(a) < $signed(b)) ? 1 : 0; // SLT
+            4'b1001: result = (a < b) ? 1 : 0; // SLTU
+            4'b1010: result = b;               // PASS B (for LUI, AUIPC)
+            default: result = 0;
+        endcase
+    end
+    
+    assign zero = (result == 0);
+    assign less_than = ($signed(a) < $signed(b));
+endmodule
+
+// ==================== Control Unit (Complete RV32I) ====================
+module ControlUnit(
+    input [6:0] opcode,
+    input [2:0] funct3,
+    input [6:0] funct7,
+    input [11:0] imm12,
+    output reg reg_write, mem_write, mem_read,
+    output reg alu_src, mem_to_reg, branch, jump, jalr,
+    output reg [1:0] branch_type, mem_size,
+    output reg mem_sign_ext, auipc_sel, ecall, ebreak,
+    output reg [3:0] alu_ctrl
+);
+    always @(*) begin
+        // Defaults
+        reg_write = 0; mem_write = 0; mem_read = 0;
+        alu_src = 0; mem_to_reg = 0; branch = 0; jump = 0; jalr = 0;
+        branch_type = 2'b00; mem_size = 2'b10; mem_sign_ext = 1;
+        auipc_sel = 0; ecall = 0; ebreak = 0;
+        alu_ctrl = 4'b0000;
+        
+        case(opcode)
+            7'b0110011: begin // R-type
+                reg_write = 1;
+                alu_src = 0;
+                case(funct3)
+                    3'b000: alu_ctrl = (funct7[5]) ? 4'b0001 : 4'b0000; // SUB : ADD
+                    3'b111: alu_ctrl = 4'b0010; // AND
+                    3'b110: alu_ctrl = 4'b0011; // OR
+                    3'b100: alu_ctrl = 4'b0100; // XOR
+                    3'b010: alu_ctrl = 4'b1000; // SLT
+                    3'b011: alu_ctrl = 4'b1001; // SLTU
+                    3'b001: alu_ctrl = 4'b0101; // SLL
+                    3'b101: alu_ctrl = (funct7[5]) ? 4'b0111 : 4'b0110; // SRA : SRL
+                endcase
+            end
+            
+            7'b0010011: begin // I-type ALU
+                reg_write = 1;
+                alu_src = 1;
+                case(funct3)
+                    3'b000: alu_ctrl = 4'b0000; // ADDI
+                    3'b100: alu_ctrl = 4'b0100; // XORI
+                    3'b110: alu_ctrl = 4'b0011; // ORI
+                    3'b111: alu_ctrl = 4'b0010; // ANDI
+                    3'b010: alu_ctrl = 4'b1000; // SLTI
+                    3'b011: alu_ctrl = 4'b1001; // SLTIU
+                    3'b001: alu_ctrl = 4'b0101; // SLLI
+                    3'b101: alu_ctrl = (funct7[5]) ? 4'b0111 : 4'b0110; // SRAI : SRLI
+                endcase
+            end
+            
+            7'b0000011: begin // Load
+                reg_write = 1;
+                mem_read = 1;
+                alu_src = 1;
+                mem_to_reg = 1;
+                alu_ctrl = 4'b0000;
+                case(funct3)
+                    3'b000: begin mem_size = 2'b00; mem_sign_ext = 1; end // LB
+                    3'b001: begin mem_size = 2'b01; mem_sign_ext = 1; end // LH
+                    3'b010: begin mem_size = 2'b10; mem_sign_ext = 1; end // LW
+                    3'b100: begin mem_size = 2'b00; mem_sign_ext = 0; end // LBU
+                    3'b101: begin mem_size = 2'b01; mem_sign_ext = 0; end // LHU
+                endcase
+            end
+            
+            7'b0100011: begin // Store
+                mem_write = 1;
+                alu_src = 1;
+                alu_ctrl = 4'b0000;
+                case(funct3)
+                    3'b000: mem_size = 2'b00; // SB
+                    3'b001: mem_size = 2'b01; // SH
+                    3'b010: mem_size = 2'b10; // SW
+                endcase
+            end
+            
+            7'b1100011: begin // Branch
+                branch = 1;
+                alu_ctrl = 4'b0001; // SUB
+                case(funct3)
+                    3'b000: branch_type = 2'b00; // BEQ
+                    3'b001: branch_type = 2'b01; // BNE
+                    3'b100: branch_type = 2'b10; // BLT
+                    3'b101: branch_type = 2'b11; // BGE
+                    3'b110: branch_type = 2'b10; // BLTU (reuse BLT logic with unsigned)
+                    3'b111: branch_type = 2'b11; // BGEU
+                endcase
+            end
+            
+            7'b1101111: begin // JAL
+                reg_write = 1;
+                jump = 1;
+            end
+            
+            7'b1100111: begin // JALR
+                reg_write = 1;
+                jalr = 1;
+                alu_src = 1;
+                alu_ctrl = 4'b0000; // ADD rs1 + imm
+            end
+            
+            7'b0110111: begin // LUI
+                reg_write = 1;
+                alu_src = 1;
+                alu_ctrl = 4'b1010; // PASS immediate
+            end
+            
+            7'b0010111: begin // AUIPC
+                reg_write = 1;
+                alu_src = 1;
+                auipc_sel = 1;
+                alu_ctrl = 4'b0000; // ADD PC + imm
+            end
+            
+            7'b1110011: begin // SYSTEM
+                if(funct3 == 3'b000) begin
+                    if(imm12 == 12'h000) ecall = 1;
+                    else if(imm12 == 12'h001) ebreak = 1;
+                end
+            end
+        endcase
+    end
+endmodule
+
+// ==================== Data Memory (with byte/halfword support) ====================
+module DataMemory(
+    input clk, we, re,
+    input [1:0] size,        // 00=byte, 01=half, 10=word
+    input sign_ext,
+    input [31:0] addr, wd,
+    output reg [31:0] rd
+);
+    reg [7:0] mem [0:255];   // Byte-addressable memory
+    wire [1:0] byte_offset;
+    wire [31:0] aligned_addr;
+    
+    assign byte_offset = addr[1:0];
+    assign aligned_addr = {addr[31:2], 2'b00};
+    
+    // Read logic
+    always @(*) begin
+        case(size)
+            2'b00: begin // Byte
+                if(sign_ext)
+                    rd = {{24{mem[addr][7]}}, mem[addr]};
+                else
+                    rd = {24'b0, mem[addr]};
+            end
+            2'b01: begin // Halfword
+                if(sign_ext)
+                    rd = {{16{mem[addr+1][7]}}, mem[addr+1], mem[addr]};
+                else
+                    rd = {16'b0, mem[addr+1], mem[addr]};
+            end
+            2'b10: begin // Word
+                rd = {mem[aligned_addr+3], mem[aligned_addr+2], 
+                      mem[aligned_addr+1], mem[aligned_addr]};
+            end
+            default: rd = 0;
+        endcase
+    end
+    
+    // Write logic
+    always @(posedge clk) begin
+        if(we) begin
+            case(size)
+                2'b00: mem[addr] <= wd[7:0];              // Byte
+                2'b01: begin                               // Halfword
+                    mem[addr] <= wd[7:0];
+                    mem[addr+1] <= wd[15:8];
+                end
+                2'b10: begin                               // Word
+                    mem[aligned_addr] <= wd[7:0];
+                    mem[aligned_addr+1] <= wd[15:8];
+                    mem[aligned_addr+2] <= wd[23:16];
+                    mem[aligned_addr+3] <= wd[31:24];
+                end
+            endcase
+        end
+    end
+endmodule
+
+// ==================== Performance Counter ====================
+module PerformanceCounter(
+    input clk, rst, enable,
+    output reg [31:0] cycle_count,
+    output reg [31:0] instr_count
+);
+    always @(posedge clk or posedge rst) begin
+        if(rst) begin
+            cycle_count <= 0;
+            instr_count <= 0;
+        end else begin
+            cycle_count <= cycle_count + 1;
+            if(enable)
+                instr_count <= instr_count + 1;
+        end
+    end
+endmodule
+
+// ==================== Simple I/O Module ====================
+module SimpleIO(
+    input clk, rst,
+    input [7:0] switches,
+    input [31:0] cpu_data,
+    input write_enable,
+    output reg [7:0] leds
+);
+    always @(posedge clk or posedge rst) begin
+        if(rst)
+            leds <= 0;
+        else if(write_enable)
+            leds <= cpu_data[7:0];
+    end
+endmodule
+
+// ==================== Top Module: Complete RV32I CPU ====================
+module CPU(
+    input clk, rst,
+    input [7:0] switches,
+    input step_mode,
+    input step_trigger,
+    output [7:0] leds,
+    output [31:0] cycle_count,
+    output [31:0] instr_count,
+    output [31:0] current_pc,
+    output halt_flag
+);
+    // Wires
+    wire [31:0] pc, pc_next, pc_plus4, pc_branch, pc_jump;
+    wire [31:0] instr;
+    wire [31:0] rd1, rd2, imm, alu_a, alu_b, alu_result, mem_data, write_data;
+    wire [3:0] alu_ctrl;
+    wire [1:0] branch_type, mem_size;
+    wire reg_write, mem_write, mem_read, alu_src, mem_to_reg;
+    wire branch, jump, jalr, mem_sign_ext, auipc_sel;
+    wire ecall, ebreak, halt;
+    wire zero, less_than, branch_taken;
+    
+    // Halt on ECALL/EBREAK
+    assign halt = ecall | ebreak;
+    assign halt_flag = halt;
+    
+    // Branch logic
+    reg branch_condition;
+    always @(*) begin
+        case(branch_type)
+            2'b00: branch_condition = zero;         // BEQ
+            2'b01: branch_condition = ~zero;        // BNE
+            2'b10: branch_condition = less_than;    // BLT/BLTU
+            2'b11: branch_condition = ~less_than;   // BGE/BGEU
+        endcase
+    end
+    
+    assign branch_taken = branch & branch_condition;
+    
+    // PC logic
+    assign pc_plus4 = pc + 4;
+    assign pc_branch = pc + imm;
+    assign pc_jump = jalr ? (alu_result & 32'hFFFFFFFE) : (pc + imm);
+    assign pc_next = (jump | jalr) ? pc_jump : (branch_taken ? pc_branch : pc_plus4);
+    assign current_pc = pc;
+    
+    // Instantiate modules
+    PC pc_reg(
+        .clk(clk), .rst(rst), 
+        .step_mode(step_mode), .step_trigger(step_trigger),
+        .halt(halt),
+        .pc_next(pc_next), .pc(pc)
+    );
+    
+    InstructionMemory imem(.addr(pc), .instruction(instr));
+    
+    ControlUnit ctrl(
+        .opcode(instr[6:0]), .funct3(instr[14:12]), .funct7(instr[31:25]),
+        .imm12(instr[31:20]),
+        .reg_write(reg_write), .mem_write(mem_write), .mem_read(mem_read),
+        .alu_src(alu_src), .mem_to_reg(mem_to_reg), 
+        .branch(branch), .jump(jump), .jalr(jalr),
+        .branch_type(branch_type), .mem_size(mem_size),
+        .mem_sign_ext(mem_sign_ext), .auipc_sel(auipc_sel),
+        .ecall(ecall), .ebreak(ebreak),
+        .alu_ctrl(alu_ctrl)
+    );
+    
+    RegisterFile regfile(
+        .clk(clk), .we(reg_write),
+        .ra1(instr[19:15]), .ra2(instr[24:20]), .wa(instr[11:7]),
+        .wd(write_data), .rd1(rd1), .rd2(rd2)
+    );
+    
+    ImmGen immgen(.instr(instr), .imm(imm));
+    
+    // ALU input selection
+    assign alu_a = auipc_sel ? pc : rd1;
+    assign alu_b = alu_src ? imm : rd2;
+    
+    ALU alu(
+        .a(alu_a), .b(alu_b), .alu_ctrl(alu_ctrl), 
+        .result(alu_result), .zero(zero), .less_than(less_than)
+    );
+    
+    DataMemory dmem(
+        .clk(clk), .we(mem_write), .re(mem_read),
+        .size(mem_size), .sign_ext(mem_sign_ext),
+        .addr(alu_result), .wd(rd2), .rd(mem_data)
+    );
+    
+    // Writeback logic
+    assign write_data = (jump | jalr) ? pc_plus4 : (mem_to_reg ? mem_data : alu_result);
+    
+    // Performance Counter
+    PerformanceCounter perf_counter(
+        .clk(clk), .rst(rst), 
+        .enable(!halt && (!step_mode || step_trigger)),
+        .cycle_count(cycle_count), 
+        .instr_count(instr_count)
+    );
+    
+    // Simple I/O
+    SimpleIO io_module(
+        .clk(clk), .rst(rst),
+        .switches(switches),
+        .cpu_data(rd1),
+        .write_enable(mem_write && (alu_result == 32'hFFFF0000)),
+        .leds(leds)
+    );
+    
+    // Monitor
+    always @(posedge clk) begin
+        if(!rst && (!step_mode || step_trigger) && !halt) begin
+            if(ecall) $display(">>> ECALL at PC=%0d", pc);
+            if(ebreak) $display(">>> EBREAK at PC=%0d", pc);
+        end
+    end
+endmodule
